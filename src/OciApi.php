@@ -132,30 +132,81 @@ EOD;
         return $this->call($config, $baseUrl, 'GET', null, $params);
     }
 
-    public function checkExistingInstances(OciConfig $config, array $listResponse, string $shape, int $maxRunningInstancesOfThatShape): string
-    {
-        $this->existingInstances = array_filter($listResponse, function ($instance) use ($shape) {
-//        $unacceptableStates = ['RUNNING', 'PROVISIONING', 'STARTING', 'STOPPED', 'STOPPING', 'TERMINATING'];
-            $acceptableStates = ['TERMINATED'];
-            return !in_array($instance['lifecycleState'], $acceptableStates) && $instance['shape'] === $shape;
-        });
+    public function checkExistingInstances(
+    OciConfig $config,
+    array $listResponse,
+    string $shape,
+    int $maxRunningInstancesOfThatShape
+): string
+{
+    $this->existingInstances = array_filter(
+        $listResponse,
+        function ($instance) use ($shape) {
+            return
+                $instance['shape'] === $shape &&
+                $instance['lifecycleState'] !== 'TERMINATED';
+        }
+    );
 
-        if (count($this->existingInstances) < $maxRunningInstancesOfThatShape) {
-            return '';
+    // Special handling for VM.Standard.A1.Flex
+    if ($shape === 'VM.Standard.A1.Flex') {
+        $totalOcpus = 0;
+        $totalMemory = 0;
+
+        foreach ($this->existingInstances as $instance) {
+            if (isset($instance['shapeConfig']['ocpus'])) {
+                $totalOcpus += (float)$instance['shapeConfig']['ocpus'];
+            }
+
+            if (isset($instance['shapeConfig']['memoryInGBs'])) {
+                $totalMemory += (float)$instance['shapeConfig']['memoryInGBs'];
+            }
         }
 
-        $displayNames = array_map(function ($instance) {
-            return $instance['displayName'];
-        }, $this->existingInstances);
-        $displayNamesString = implode(', ', $displayNames);
+        $requestedOcpus = (float)$config->ocpus;
+        $requestedMemory = (float)$config->memoryInGBs;
 
-        $lifecycleStates = array_map(function ($instance) {
-            return $instance['lifecycleState'];
-        }, $this->existingInstances);
-        $lifecycleStatesString = implode(', ', $lifecycleStates);
+        if (
+            ($totalOcpus + $requestedOcpus) > 4 ||
+            ($totalMemory + $requestedMemory) > 24
+        ) {
+            return sprintf(
+                'A1.Flex capacity exceeded. Existing: %.1f OCPUs / %.1f GB RAM. Requested: %.1f OCPUs / %.1f GB RAM. User: %s',
+                $totalOcpus,
+                $totalMemory,
+                $requestedOcpus,
+                $requestedMemory,
+                $config->ociUserId
+            );
+        }
 
-        return "Already have an instance(s) [$displayNamesString] in state(s) (respectively) [$lifecycleStatesString]. User: $config->ociUserId\n";
+        // Capacity OK → allow creation
+        return '';
     }
+
+    // Default behavior for all other shapes (count-based)
+    if (count($this->existingInstances) < $maxRunningInstancesOfThatShape) {
+        return '';
+    }
+
+    $displayNames = array_map(
+        fn ($instance) => $instance['displayName'],
+        $this->existingInstances
+    );
+
+    $lifecycleStates = array_map(
+        fn ($instance) => $instance['lifecycleState'],
+        $this->existingInstances
+    );
+
+    return sprintf(
+        'Already have instance(s) [%s] in state(s) [%s]. User: %s',
+        implode(', ', $displayNames),
+        implode(', ', $lifecycleStates),
+        $config->ociUserId
+    );
+}
+
 
     /**
      * @param OciConfig $config
